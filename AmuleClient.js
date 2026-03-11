@@ -283,6 +283,8 @@ class AmuleClient {
       const ecid = tag.humanValue || tag.value;
       const existing = this._updateState.downloads.get(ecid) || { ecid };
       const updates = this._parseDownloadFields(tag);
+      // Merge raw tag tree incrementally (preserves fields from prior full update)
+      updates.raw = { ...(existing.raw || {}), ...this.buildTagTree(tag.children) };
       const merged = { ...existing, ...updates };
       // Recalculate progress after merge (incremental may update only one of the two size fields)
       if (merged.fileSize > 0 && merged.fileSizeDownloaded !== undefined) {
@@ -297,6 +299,7 @@ class AmuleClient {
       const ecid = tag.humanValue || tag.value;
       const existing = this._updateState.sharedFiles.get(ecid) || { ecid };
       const updates = this._parseSharedFileFields(tag);
+      updates.raw = { ...(existing.raw || {}), ...this.buildTagTree(tag.children) };
       this._updateState.sharedFiles.set(ecid, { ...existing, ...updates });
     }
 
