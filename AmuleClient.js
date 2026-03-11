@@ -7,7 +7,8 @@ const {
   EC_TAG_TYPES,
   EC_SEARCH_TYPE,
   EC_VALUE_TYPE,
-  EC_PREFS
+  EC_PREFS,
+  EC_DETAIL_LEVEL
 } = require("./ECDefs");
 
 const DEBUG = false;
@@ -180,9 +181,9 @@ class AmuleClient {
     const sharedFiles = response.tags.map(tag => ({
       fileName: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_NAME)?.humanValue,
       fileHash: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_HASH)?.humanValue,
-      fileSize: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_SIZE_FULL)?.humanValue,
-      transferred: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_KNOWNFILE_XFERRED)?.humanValue,
-      transferredTotal: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_KNOWNFILE_XFERRED_ALL)?.humanValue,
+      fileSize: Number(tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_SIZE_FULL)?.humanValue),
+      transferred: Number(tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_KNOWNFILE_XFERRED)?.humanValue),
+      transferredTotal: Number(tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_KNOWNFILE_XFERRED_ALL)?.humanValue),
       reqCount: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_KNOWNFILE_REQ_COUNT)?.humanValue,
       reqCountTotal: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_KNOWNFILE_REQ_COUNT_ALL)?.humanValue,
       acceptedCount: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_KNOWNFILE_ACCEPT_COUNT)?.humanValue,
@@ -219,9 +220,9 @@ class AmuleClient {
       fileName: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_NAME)?.humanValue,
       fileHash: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_HASH)?.humanValue,
       status: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_STATUS)?.humanValue,
-      fileSize: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_SIZE_FULL)?.humanValue,
-      fileSizeDownloaded: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_SIZE_DONE)?.humanValue,
-      progress: ((tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_SIZE_DONE)?.humanValue / tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_SIZE_FULL)?.humanValue) * 100).toFixed(2),
+      fileSize: Number(tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_SIZE_FULL)?.humanValue),
+      fileSizeDownloaded: Number(tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_SIZE_DONE)?.humanValue),
+      progress: ((Number(tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_SIZE_DONE)?.humanValue) / Number(tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_SIZE_FULL)?.humanValue)) * 100).toFixed(2),
       sourceCount: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_SOURCE_COUNT)?.humanValue,
       sourceCountNotCurrent: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_SOURCE_COUNT_NOT_CURRENT)?.humanValue,
       sourceCountXfer: tag.children.find(child => child.tagId === EC_TAGS.EC_TAG_PARTFILE_SOURCE_COUNT_XFER)?.humanValue,
@@ -237,6 +238,85 @@ class AmuleClient {
     }));
 
     return downloadQueue;
+  }
+
+  /**
+   * Request an incremental update from aMule containing files, clients, and servers.
+   *
+   * IMPORTANT: EC_OP_GET_UPDATE with EC_DETAIL_INC_UPDATE is **stateful and incremental**.
+   * The first call returns full state for all objects. Subsequent calls return only
+   * fields that changed since the last call. This method maintains an internal cache
+   * (_updateState) and merges incremental updates automatically.
+   *
+   * Returns { downloads, sharedFiles, clients } where:
+   * - downloads: array of download objects (EC_TAG_PARTFILE) with all fields
+   * - sharedFiles: array of shared file objects (EC_TAG_KNOWNFILE) with all fields
+   * - clients: array of client/peer objects (EC_TAG_CLIENT) with all fields
+   */
+  async getUpdate() {
+    if (DEBUG) console.log("[DEBUG] Requesting incremental update");
+
+    const reqTags = [
+      this.session.createTag(
+        EC_TAGS.EC_TAG_DETAIL_LEVEL,
+        EC_TAG_TYPES.EC_TAGTYPE_UINT8,
+        EC_DETAIL_LEVEL.EC_DETAIL_INC_UPDATE
+      )
+    ];
+
+    const response = await this.session.sendPacket(EC_OPCODES.EC_OP_GET_UPDATE, reqTags);
+
+    if (DEBUG) console.log("[DEBUG] Received update response, tags:", response.tags?.length);
+
+    // Initialize state cache on first call
+    if (!this._updateState) {
+      this._updateState = {
+        downloads: new Map(),    // ecid → download object
+        sharedFiles: new Map(),  // ecid → shared file object
+        clients: new Map(),      // ecid → client object
+      };
+    }
+
+    // Parse and merge downloads (EC_TAG_PARTFILE tags at root level)
+    for (const tag of response.tags) {
+      if (tag.tagId !== EC_TAGS.EC_TAG_PARTFILE) continue;
+      const ecid = tag.humanValue || tag.value;
+      const existing = this._updateState.downloads.get(ecid) || { ecid };
+      const updates = this._parseDownloadFields(tag);
+      const merged = { ...existing, ...updates };
+      // Recalculate progress after merge (incremental may update only one of the two size fields)
+      if (merged.fileSize > 0 && merged.fileSizeDownloaded !== undefined) {
+        merged.progress = ((merged.fileSizeDownloaded / merged.fileSize) * 100).toFixed(2);
+      }
+      this._updateState.downloads.set(ecid, merged);
+    }
+
+    // Parse and merge shared files (EC_TAG_KNOWNFILE tags at root level)
+    for (const tag of response.tags) {
+      if (tag.tagId !== EC_TAGS.EC_TAG_KNOWNFILE) continue;
+      const ecid = tag.humanValue || tag.value;
+      const existing = this._updateState.sharedFiles.get(ecid) || { ecid };
+      const updates = this._parseSharedFileFields(tag);
+      this._updateState.sharedFiles.set(ecid, { ...existing, ...updates });
+    }
+
+    // Parse and merge clients from EC_TAG_CLIENT container
+    const clientContainer = response.tags.find(tag => tag.tagId === EC_TAGS.EC_TAG_CLIENT);
+    if (clientContainer && clientContainer.children) {
+      const clientTags = clientContainer.children.filter(c => c.tagId === EC_TAGS.EC_TAG_CLIENT);
+      for (const clientTag of clientTags) {
+        const ecid = clientTag.humanValue || clientTag.value;
+        const existing = this._updateState.clients.get(ecid) || { ecid };
+        const updates = this._parseClientFields(clientTag);
+        this._updateState.clients.set(ecid, { ...existing, ...updates });
+      }
+    }
+
+    return {
+      downloads: Array.from(this._updateState.downloads.values()),
+      sharedFiles: Array.from(this._updateState.sharedFiles.values()),
+      clients: Array.from(this._updateState.clients.values()),
+    };
   }
 
   async _search(query, network, extension=null) {
@@ -651,7 +731,175 @@ class AmuleClient {
 
     return response.opcode === EC_OPCODES.EC_OP_NOOP || response.opcode === 0x01;
   }
- 
+
+  // File Rename
+
+  async renameFile(fileHash, newName) {
+    if (DEBUG) console.log("[DEBUG] Renaming file:", fileHash, "->", newName);
+
+    // As per aMule source (ExternalConn.cpp): EC_OP_RENAME_FILE expects
+    // EC_TAG_KNOWNFILE (hash) + EC_TAG_PARTFILE_NAME (new name) as top-level tags.
+    // It searches download queue first, then known files.
+    const reqTags = [
+      this.session.createTag(
+        EC_TAGS.EC_TAG_KNOWNFILE,
+        EC_TAG_TYPES.EC_TAGTYPE_HASH16,
+        fileHash
+      ),
+      this.session.createTag(
+        EC_TAGS.EC_TAG_PARTFILE_NAME,
+        EC_TAG_TYPES.EC_TAGTYPE_STRING,
+        newName
+      )
+    ];
+
+    const response = await this.session.sendPacket(EC_OPCODES.EC_OP_RENAME_FILE, reqTags);
+
+    if (DEBUG) console.log("[DEBUG] Received response:", response);
+
+    if (response.opcode === EC_OPCODES.EC_OP_FAILED) {
+      const errorMsg = response.tags?.find(t => t.tagId === EC_TAGS.EC_TAG_STRING)?.humanValue;
+      return { success: false, error: errorMsg || 'Rename failed' };
+    }
+
+    return { success: response.opcode === EC_OPCODES.EC_OP_NOOP || response.opcode === 0x01 };
+  }
+
+  /**
+   * Parse only the fields present in a client tag (for incremental merging).
+   * Returns an object with only the fields that were actually in the response.
+   */
+  /**
+   * Parse only the fields present in a download (EC_TAG_PARTFILE) tag.
+   * Returns an object with only the fields actually in the response.
+   */
+  _parseDownloadFields(tag) {
+    const result = {};
+    if (!tag.children) return result;
+
+    for (const sub of tag.children) {
+      const val = sub.humanValue;
+      switch (sub.tagId) {
+        case EC_TAGS.EC_TAG_PARTFILE_NAME:                    result.fileName = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_HASH:                    result.fileHash = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_STATUS:                  result.status = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_SIZE_FULL:               result.fileSize = Number(val); break;
+        case EC_TAGS.EC_TAG_PARTFILE_SIZE_DONE:               result.fileSizeDownloaded = Number(val); break;
+        case EC_TAGS.EC_TAG_PARTFILE_SPEED:                   result.speed = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_SOURCE_COUNT:            result.sourceCount = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_SOURCE_COUNT_XFER:       result.sourceCountXfer = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_SOURCE_COUNT_A4AF:       result.sourceCountA4AF = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_SOURCE_COUNT_NOT_CURRENT: result.sourceCountNotCurrent = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_PRIO:                    result.priority = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_CAT:                     result.category = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_LAST_SEEN_COMP:          result.lastSeenComplete = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_ED2K_LINK:               result.ed2kLink = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_PART_STATUS:             result.partStatus = sub.value; break;
+        case EC_TAGS.EC_TAG_PARTFILE_GAP_STATUS:              result.gapStatus = sub.value; break;
+        case EC_TAGS.EC_TAG_PARTFILE_REQ_STATUS:              result.reqStatus = sub.value; break;
+      }
+    }
+
+    // Calculate progress when both size fields are present
+    if (result.fileSizeDownloaded !== undefined && result.fileSize !== undefined && result.fileSize > 0) {
+      result.progress = ((result.fileSizeDownloaded / result.fileSize) * 100).toFixed(2);
+    }
+
+    return result;
+  }
+
+  /**
+   * Parse only the fields present in a shared file (EC_TAG_KNOWNFILE) tag.
+   * Returns an object with only the fields actually in the response.
+   */
+  _parseSharedFileFields(tag) {
+    const result = {};
+    if (!tag.children) return result;
+
+    for (const sub of tag.children) {
+      const val = sub.humanValue;
+      switch (sub.tagId) {
+        case EC_TAGS.EC_TAG_PARTFILE_NAME:               result.fileName = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_HASH:               result.fileHash = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_SIZE_FULL:          result.fileSize = Number(val); break;
+        case EC_TAGS.EC_TAG_KNOWNFILE_XFERRED:           result.transferred = Number(val); break;
+        case EC_TAGS.EC_TAG_KNOWNFILE_XFERRED_ALL:       result.transferredTotal = Number(val); break;
+        case EC_TAGS.EC_TAG_KNOWNFILE_REQ_COUNT:         result.reqCount = val; break;
+        case EC_TAGS.EC_TAG_KNOWNFILE_REQ_COUNT_ALL:     result.reqCountTotal = val; break;
+        case EC_TAGS.EC_TAG_KNOWNFILE_ACCEPT_COUNT:      result.acceptedCount = val; break;
+        case EC_TAGS.EC_TAG_KNOWNFILE_ACCEPT_COUNT_ALL:  result.acceptedCountTotal = val; break;
+        case EC_TAGS.EC_TAG_KNOWNFILE_PRIO:              result.priority = val; break;
+        case EC_TAGS.EC_TAG_KNOWNFILE_FILENAME:          result.path = val; break;
+        case EC_TAGS.EC_TAG_KNOWNFILE_COMPLETE_SOURCES:  result.completeSources = val; break;
+        case EC_TAGS.EC_TAG_KNOWNFILE_ON_QUEUE:          result.onQueue = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_ED2K_LINK:          result.ed2kLink = val; break;
+      }
+    }
+
+    return result;
+  }
+
+  _parseClientFields(clientTag) {
+    const result = {};
+    if (!clientTag.children) return result;
+
+    for (const sub of clientTag.children) {
+      const val = sub.humanValue;
+      switch (sub.tagId) {
+        case EC_TAGS.EC_TAG_CLIENT_NAME:           result.userName = val || ''; break;
+        case EC_TAGS.EC_TAG_CLIENT_HASH:            result.userHash = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_REQUEST_FILE:    result.requestFileEcid = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_UPLOAD_FILE:     result.uploadFileEcid = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_SOFTWARE:        result.software = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_SOFT_VER_STR:    result.softwareVersion = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_DOWNLOAD_STATE:  result.downloadState = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_UPLOAD_STATE:    result.uploadState = val; break;
+        // DOWN_SPEED is returned as float in KB/s, UP_SPEED as integer in B/s
+        // Normalize both to bytes/sec for consistent handling
+        case EC_TAGS.EC_TAG_CLIENT_DOWN_SPEED:      result.downSpeed = ((val || 0) * 1024) | 0; break;
+        case EC_TAGS.EC_TAG_CLIENT_UP_SPEED:        result.upSpeed = val || 0; break;
+        case EC_TAGS.EC_TAG_CLIENT_DOWNLOAD_TOTAL:  result.downloadTotal = val || 0; break;
+        case EC_TAGS.EC_TAG_CLIENT_UPLOAD_TOTAL:    result.uploadTotal = val || 0; break;
+        case EC_TAGS.EC_TAG_CLIENT_USER_IP:
+          // Convert 32-bit little-endian integer to dotted notation
+          if (typeof val === 'number' && val > 0) {
+            result.ip = `${val & 0xFF}.${(val >>> 8) & 0xFF}.${(val >>> 16) & 0xFF}.${(val >>> 24) & 0xFF}`;
+          } else {
+            result.ip = val;
+          }
+          break;
+        case EC_TAGS.EC_TAG_CLIENT_USER_PORT:       result.port = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_FROM:            result.sourceFrom = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_REMOTE_QUEUE_RANK: result.remoteQueueRank = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_REMOTE_FILENAME: result.remoteFilename = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_SCORE:           result.score = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_IDENT_STATE:     result.identState = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_OBFUSCATION_STATUS: result.obfuscation = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_PART_STATUS:     result.partStatus = sub.value; break;
+        case EC_TAGS.EC_TAG_CLIENT_AVAILABLE_PARTS: result.availableParts = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_SERVER_NAME:     result.serverName = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_SERVER_IP:
+          if (typeof val === 'number' && val > 0) {
+            result.serverIP = `${val & 0xFF}.${(val >>> 8) & 0xFF}.${(val >>> 16) & 0xFF}.${(val >>> 24) & 0xFF}`;
+          } else {
+            result.serverIP = val;
+          }
+          break;
+        case EC_TAGS.EC_TAG_CLIENT_SERVER_PORT:     result.serverPort = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_MOD_VERSION:     result.modVersion = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_OS_INFO:         result.osInfo = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_KAD_PORT:        result.kadPort = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_NAME:          result.transferFileName = val; break;
+        case EC_TAGS.EC_TAG_PARTFILE_SIZE_XFER:     result.transferredSession = val; break;
+        case EC_TAGS.EC_TAG_CLIENT_UPLOAD_SESSION:  result.uploadSession = val; break;
+      }
+    }
+
+    return result;
+  }
+
+
+
   /*
       Helper functions
   */
