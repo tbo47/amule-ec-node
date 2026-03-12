@@ -13,30 +13,6 @@ const {
 
 const DEBUG = false;
 
-/**
- * Deep merge for raw tag trees from incremental updates.
- * When an incremental update sends a nested tag (e.g. EC_TAG_PARTFILE_SOURCE_NAMES)
- * with only some child fields updated, a shallow merge would replace the entire
- * nested object and lose unchanged fields. This deep merge preserves them.
- * Arrays are always replaced (not merged) since they represent complete lists.
- */
-function deepMergeRaw(existing, updates) {
-  const result = { ...existing };
-  for (const key of Object.keys(updates)) {
-    const newVal = updates[key];
-    const oldVal = result[key];
-    if (
-      newVal && typeof newVal === 'object' && !Array.isArray(newVal) &&
-      oldVal && typeof oldVal === 'object' && !Array.isArray(oldVal)
-    ) {
-      result[key] = deepMergeRaw(oldVal, newVal);
-    } else {
-      result[key] = newVal;
-    }
-  }
-  return result;
-}
-
 class AmuleClient {
   constructor(host, port, password, options = {}) {
     this.session = new ECProtocol(host, port, password, options);
@@ -311,7 +287,7 @@ class AmuleClient {
       const existing = this._updateState.downloads.get(ecid) || { ecid };
       const updates = this._parseDownloadFields(tag);
       // Merge raw tag tree incrementally (preserves fields from prior full update)
-      updates.raw = deepMergeRaw(existing.raw || {}, this.buildTagTree(tag.children));
+      updates.raw = this.deepMergeRaw(existing.raw || {}, this.buildTagTree(tag.children));
       const merged = { ...existing, ...updates };
       // Recalculate progress after merge (incremental may update only one of the two size fields)
       if (merged.fileSize > 0 && merged.fileSizeDownloaded !== undefined) {
@@ -335,7 +311,7 @@ class AmuleClient {
       seenSharedFiles.add(ecid);
       const existing = this._updateState.sharedFiles.get(ecid) || { ecid };
       const updates = this._parseSharedFileFields(tag);
-      updates.raw = deepMergeRaw(existing.raw || {}, this.buildTagTree(tag.children));
+      updates.raw = this.deepMergeRaw(existing.raw || {}, this.buildTagTree(tag.children));
       this._updateState.sharedFiles.set(ecid, { ...existing, ...updates });
     }
     // Remove shared files no longer present (unshared)
@@ -1052,6 +1028,70 @@ class AmuleClient {
       default:
         return value;
     }
+  }
+
+  /**
+   * Deep merge for raw tag trees from incremental EC updates.
+   *
+   * aMule's EC protocol sends only changed fields in incremental updates
+   * (EC_DETAIL_INC_UPDATE). For nested structures like EC_TAG_PARTFILE_SOURCE_NAMES,
+   * the server uses an ID-based diff: each entry is identified by a numeric ID
+   * (stored as _value by buildTagTree). Count-only updates omit the filename string,
+   * expecting the client to preserve it from the initial full response.
+   *
+   * This merge handles:
+   * - Objects: recursively merged (unchanged fields preserved)
+   * - Arrays of objects with _value (ID-keyed): merged by matching _value,
+   *   entries with count=0 are removals (aMule protocol convention)
+   * - Other arrays / primitives: replaced outright
+   */
+  deepMergeRaw(existing, updates) {
+    const result = { ...existing };
+    for (const key of Object.keys(updates)) {
+      let newVal = updates[key];
+      let oldVal = result[key];
+
+      // Normalize: when one side is an array and the other a single ID-keyed object,
+      // wrap the single object so both sides are arrays (buildTagTree produces a
+      // single object when there's one entry, an array when there are multiple).
+      if (oldVal && newVal && typeof newVal === 'object' && typeof oldVal === 'object') {
+        const newIsIdObj = !Array.isArray(newVal) && '_value' in newVal;
+        const oldIsIdObj = !Array.isArray(oldVal) && '_value' in oldVal;
+        if (Array.isArray(oldVal) && newIsIdObj) newVal = [newVal];
+        if (oldIsIdObj && Array.isArray(newVal)) oldVal = [oldVal];
+      }
+
+      if (Array.isArray(newVal) && Array.isArray(oldVal) && newVal.length > 0 &&
+          typeof newVal[0] === 'object' && newVal[0] !== null && '_value' in newVal[0]) {
+        // ID-keyed array merge (matches aMule's CPartFile_Encoder behaviour)
+        const oldMap = new Map();
+        for (const entry of oldVal) {
+          if (entry && entry._value !== undefined) oldMap.set(entry._value, entry);
+        }
+        for (const entry of newVal) {
+          const id = entry._value;
+          const prev = oldMap.get(id);
+          if (prev) {
+            oldMap.set(id, this.deepMergeRaw(prev, entry));
+          } else {
+            oldMap.set(id, entry);
+          }
+        }
+        // Filter out entries where the server signalled removal (count = 0)
+        const countKey = key + '_COUNTS';
+        result[key] = [...oldMap.values()].filter(e =>
+          e[countKey] === undefined || e[countKey] !== 0
+        );
+      } else if (
+        newVal && typeof newVal === 'object' && !Array.isArray(newVal) &&
+        oldVal && typeof oldVal === 'object' && !Array.isArray(oldVal)
+      ) {
+        result[key] = this.deepMergeRaw(oldVal, newVal);
+      } else {
+        result[key] = newVal;
+      }
+    }
+    return result;
   }
 
   buildTagTree(tags) {
