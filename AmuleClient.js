@@ -1057,8 +1057,9 @@ class AmuleClient {
       if (oldVal && newVal && typeof newVal === 'object' && typeof oldVal === 'object') {
         const newIsIdObj = !Array.isArray(newVal) && '_value' in newVal;
         const oldIsIdObj = !Array.isArray(oldVal) && '_value' in oldVal;
-        if (Array.isArray(oldVal) && newIsIdObj) newVal = [newVal];
-        if (oldIsIdObj && Array.isArray(newVal)) oldVal = [oldVal];
+        if (oldIsIdObj && newIsIdObj) { oldVal = [oldVal]; newVal = [newVal]; }
+        else if (Array.isArray(oldVal) && newIsIdObj) newVal = [newVal];
+        else if (oldIsIdObj && Array.isArray(newVal)) oldVal = [oldVal];
       }
 
       if (Array.isArray(newVal) && Array.isArray(oldVal) && newVal.length > 0 &&
