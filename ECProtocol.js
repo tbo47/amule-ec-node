@@ -24,6 +24,8 @@ class ECProtocol {
     this.pendingRequests = [];
     // Per-request timeout in ms (0 = disabled). Default 30s.
     this.requestTimeout = options.requestTimeout !== undefined ? options.requestTimeout : 30000;
+    // Consecutive timeout counter — after 2 in a row, destroy socket to trigger reconnect
+    this.consecutiveTimeouts = 0;
   }
 
   async connect() {
@@ -106,6 +108,7 @@ class ECProtocol {
         if(DEBUG) console.log(`[ECProtocol] Authentication attempt ${i + 1}...`);
         await this.authenticate();
         console.log("[ECProtocol] Reconnected and authenticated successfully.");
+        this.consecutiveTimeouts = 0;
         this.reconnecting = false;
         return;
       } catch (err) {
@@ -289,6 +292,7 @@ class ECProtocol {
 
           settled = true;
           cleanup();
+          this.consecutiveTimeouts = 0; // Successful response — reset timeout counter
 
           // Process the full packet
           const parsed = this.parsePacket(buffer);
@@ -319,7 +323,16 @@ class ECProtocol {
             if (settled) return;
             settled = true;
             cleanup();
+            this.consecutiveTimeouts++;
             const opcodeStr = this.getKeyByValue(EC_OPCODES, opcode);
+
+            // After 2 consecutive timeouts, the connection is likely dead.
+            // Destroy the socket to trigger the 'close' handler → automatic reconnect.
+            if (this.consecutiveTimeouts >= 2 && this.socket && !this.socket.destroyed) {
+              console.warn(`[ECProtocol] ${this.consecutiveTimeouts} consecutive timeouts — destroying socket to trigger reconnect`);
+              this.socket.destroy();
+            }
+
             reject(new Error(`Request timed out after ${this.requestTimeout}ms (opcode: ${opcodeStr})`));
           }, this.requestTimeout);
         }
