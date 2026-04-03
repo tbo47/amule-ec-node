@@ -200,9 +200,6 @@ class AmuleClient {
   /**
    * Get the full list of shared files (non-incremental).
    * Unlike getUpdate(), this always returns the complete list.
-   * 
-   * **Note to AI:**  to get the list of downloaded files, use getSharedFiles() and remove getDownloadQueue() files from the response
-   * 
    * @returns {Promise<{fileName: string, fileHash: string, fileSize: number, transferred: number, transferredTotal: number, reqCount: number, reqCountTotal: number, acceptedCount: number, acceptedCountTotal: number, priority: number, path: string, completeSources: number, onQueue: number, ed2kLink: string, raw: Object}[]>} Parsed shared file objects
    */
   async getSharedFiles() {
@@ -1470,7 +1467,7 @@ class AmuleClient {
         // No children - just use the formatted value directly
         node = formattedValue;
       }
-      
+
       // Handle duplicate keys by converting to array
       if (obj.hasOwnProperty(tag.tagIdStr)) {
         if (!Array.isArray(obj[tag.tagIdStr])) {
@@ -1481,8 +1478,164 @@ class AmuleClient {
         obj[tag.tagIdStr] = node;
       }
     }
-    
+
     return obj;
+  }
+
+  // ==========================================================================
+  // PREFERENCES
+  // ==========================================================================
+
+  /**
+   * Get connection preferences from aMule.
+   * All speed/capacity values are in kB/s.
+   * @returns {Promise<Object>} Connection preferences:
+   *   { slotAllocation (kB/s per upload slot), maxDownload (kB/s, 0=unlimited), maxUpload (kB/s, 0=unlimited),
+   *     dlCapacity (kB/s, graph scale), ulCapacity (kB/s, graph scale),
+   *     tcpPort, udpPort, udpDisabled, maxConnections, autoConnect, ed2kEnabled, kadEnabled }
+   */
+  async getConnectionPreferences() {
+    if (DEBUG) console.log("[DEBUG] Requesting connection preferences...");
+
+    const reqTags = [
+      this.session.createTag(
+        EC_TAGS.EC_TAG_SELECT_PREFS,
+        EC_TAG_TYPES.EC_TAGTYPE_UINT32,
+        EC_PREFS.EC_PREFS_CONNECTIONS
+      )
+    ];
+
+    const response = await this.session.sendPacket(EC_OPCODES.EC_OP_GET_PREFERENCES, reqTags);
+
+    if (DEBUG) console.log("[DEBUG] Connection preferences response:", JSON.stringify(response, null, 2));
+
+    return this._parseConnectionPreferences(response.tags);
+  }
+
+  /**
+   * Set connection preferences on aMule.
+   * Only the fields provided will be updated — omitted fields remain unchanged.
+   * All speed/capacity values are in kB/s.
+   * @param {Object} prefs - Preferences to set (all optional):
+   *   { slotAllocation (kB/s per upload slot), maxDownload (kB/s, 0=unlimited),
+   *     maxUpload (kB/s, 0=unlimited), dlCapacity (kB/s, graph scale), ulCapacity (kB/s, graph scale),
+   *     maxConnections }
+   * @returns {Promise<boolean>} True if preferences were set successfully
+   */
+  async setConnectionPreferences(prefs) {
+    if (DEBUG) console.log("[DEBUG] Setting connection preferences:", prefs);
+
+    const children = [];
+
+    if (prefs.slotAllocation !== undefined) {
+      children.push({
+        tagId: EC_TAGS.EC_TAG_CONN_SLOT_ALLOCATION,
+        tagType: EC_TAG_TYPES.EC_TAGTYPE_UINT16,
+        value: prefs.slotAllocation
+      });
+    }
+    if (prefs.maxDownload !== undefined) {
+      children.push({
+        tagId: EC_TAGS.EC_TAG_CONN_MAX_DL,
+        tagType: EC_TAG_TYPES.EC_TAGTYPE_UINT16,
+        value: prefs.maxDownload
+      });
+    }
+    if (prefs.maxUpload !== undefined) {
+      children.push({
+        tagId: EC_TAGS.EC_TAG_CONN_MAX_UL,
+        tagType: EC_TAG_TYPES.EC_TAGTYPE_UINT16,
+        value: prefs.maxUpload
+      });
+    }
+    if (prefs.dlCapacity !== undefined) {
+      children.push({
+        tagId: EC_TAGS.EC_TAG_CONN_DL_CAP,
+        tagType: EC_TAG_TYPES.EC_TAGTYPE_UINT32,
+        value: prefs.dlCapacity
+      });
+    }
+    if (prefs.ulCapacity !== undefined) {
+      children.push({
+        tagId: EC_TAGS.EC_TAG_CONN_UL_CAP,
+        tagType: EC_TAG_TYPES.EC_TAGTYPE_UINT32,
+        value: prefs.ulCapacity
+      });
+    }
+    if (prefs.maxConnections !== undefined) {
+      children.push({
+        tagId: EC_TAGS.EC_TAG_CONN_MAX_CONN,
+        tagType: EC_TAG_TYPES.EC_TAGTYPE_UINT16,
+        value: prefs.maxConnections
+      });
+    }
+
+    if (children.length === 0) {
+      throw new Error('No preferences provided');
+    }
+
+    const reqTags = [
+      this.session.createTag(
+        EC_TAGS.EC_TAG_PREFS_CONNECTIONS,
+        EC_TAG_TYPES.EC_TAGTYPE_CUSTOM,
+        undefined,
+        children
+      )
+    ];
+
+    const response = await this.session.sendPacket(EC_OPCODES.EC_OP_SET_PREFERENCES, reqTags);
+    return this._isSuccess(response);
+  }
+
+  /**
+   * Parse connection preferences from EC response tags.
+   * @param {Object[]} tags - Response tags
+   * @returns {Object} Parsed preferences
+   * @private
+   */
+  _parseConnectionPreferences(tags) {
+    const result = {};
+    const prefsTag = tags.find(t => t.tagId === EC_TAGS.EC_TAG_PREFS_CONNECTIONS);
+    if (!prefsTag || !prefsTag.children) return result;
+
+    // Value tags — read humanValue
+    const valueFields = {
+      [EC_TAGS.EC_TAG_CONN_SLOT_ALLOCATION]: 'slotAllocation',
+      [EC_TAGS.EC_TAG_CONN_MAX_DL]: 'maxDownload',
+      [EC_TAGS.EC_TAG_CONN_MAX_UL]: 'maxUpload',
+      [EC_TAGS.EC_TAG_CONN_DL_CAP]: 'dlCapacity',
+      [EC_TAGS.EC_TAG_CONN_UL_CAP]: 'ulCapacity',
+      [EC_TAGS.EC_TAG_CONN_TCP_PORT]: 'tcpPort',
+      [EC_TAGS.EC_TAG_CONN_UDP_PORT]: 'udpPort',
+      [EC_TAGS.EC_TAG_CONN_MAX_CONN]: 'maxConnections'
+    };
+
+    // Presence tags — present = true, absent = false
+    const presenceFields = {
+      [EC_TAGS.EC_TAG_CONN_UDP_DISABLE]: 'udpDisabled',
+      [EC_TAGS.EC_TAG_CONN_AUTOCONNECT]: 'autoConnect',
+      [EC_TAGS.EC_TAG_NETWORK_ED2K]: 'ed2kEnabled',
+      [EC_TAGS.EC_TAG_NETWORK_KADEMLIA]: 'kadEnabled'
+    };
+
+    // Initialize presence fields to false (absence = false)
+    for (const field of Object.values(presenceFields)) {
+      result[field] = false;
+    }
+
+    for (const child of prefsTag.children) {
+      const valueField = valueFields[child.tagId];
+      if (valueField) {
+        result[valueField] = child.humanValue;
+        continue;
+      }
+      const presenceField = presenceFields[child.tagId];
+      if (presenceField) {
+        result[presenceField] = true;
+      }
+    }
+
+    return result;
   }
 }
 

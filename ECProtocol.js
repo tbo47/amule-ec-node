@@ -516,13 +516,16 @@ class ECProtocol {
 
     // Step 2: Make sure we received the salt.
     if (saltResponse.opcode !== EC_OPCODES.EC_OP_AUTH_SALT) {
+      const reason = saltResponse.tags?.[0]?.humanValue || 'unknown reason';
       throw new Error(
-        "Authentication failed: Expected AUTH_SALT, received opcode: 0x" +
-          saltResponse.opcode.toString(16)
+        `Authentication failed at salt exchange (opcode: 0x${saltResponse.opcode.toString(16)}): ${reason}`
       );
     }
     const saltBuffer = saltResponse.tags[0].value;
-    const hexSalt = saltBuffer.toString("hex").toUpperCase();
+    // aMule formats the salt as %lX (uppercase hex, no leading zeros) from a uint64.
+    // We must match: read as BigInt, convert to uppercase hex without leading zeros.
+    const saltValue = saltBuffer.readBigUInt64BE(0);
+    const hexSalt = saltValue.toString(16).toUpperCase();
     //console.log("Received salt:", hexSalt);
 
     // Step 3: Compute the password hash.
@@ -548,9 +551,9 @@ class ECProtocol {
     if (authReply.opcode === EC_OPCODES.EC_OP_AUTH_OK) {
       if(DEBUG) console.log("Authentication successful");
     } else {
+      const reason = authReply.tags?.[0]?.humanValue || 'unknown reason';
       throw new Error(
-        "Authentication failed; received opcode: 0x" +
-          authReply.opcode.toString(16)
+        `Authentication failed (opcode: 0x${authReply.opcode.toString(16)}): ${reason}`
       );
     }
   }
