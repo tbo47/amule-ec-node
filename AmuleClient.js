@@ -960,7 +960,7 @@ class AmuleClient {
     for (const sub of tag.children) {
       const val = sub.humanValue;
       switch (sub.tagId) {
-        case EC_TAGS.EC_TAG_PARTFILE_NAME:                    result.fileName = fixMojibake(val); break;
+        case EC_TAGS.EC_TAG_PARTFILE_NAME:                    result.fileName = fixMojibake(val); result.rawFileName = val; break;
         case EC_TAGS.EC_TAG_PARTFILE_HASH:                    result.fileHash = val; break;
         case EC_TAGS.EC_TAG_PARTFILE_STATUS:                  result.status = val; break;
         case EC_TAGS.EC_TAG_PARTFILE_SIZE_FULL:               result.fileSize = Number(val); break;
@@ -1176,7 +1176,7 @@ class AmuleClient {
     for (const sub of tag.children) {
       const val = sub.humanValue;
       switch (sub.tagId) {
-        case EC_TAGS.EC_TAG_PARTFILE_NAME:               result.fileName = fixMojibake(val); break;
+        case EC_TAGS.EC_TAG_PARTFILE_NAME:               result.fileName = fixMojibake(val); result.rawFileName = val; break;
         case EC_TAGS.EC_TAG_PARTFILE_HASH:               result.fileHash = val; break;
         case EC_TAGS.EC_TAG_PARTFILE_SIZE_FULL:          result.fileSize = Number(val); break;
         case EC_TAGS.EC_TAG_KNOWNFILE_XFERRED:           result.transferred = Number(val); break;
